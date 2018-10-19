@@ -1,4 +1,4 @@
-/*
+ /*
  * xpmclient.cpp
  *
  *  Created on: 01.05.2014
@@ -29,9 +29,6 @@ cl_program gProgram = 0;
 std::vector<unsigned> gPrimes2;
 
 
-
-
-
 PrimeMiner::PrimeMiner(unsigned id, unsigned threads, unsigned hashprim, unsigned prim, unsigned depth) {
 	
 	mID = id;
@@ -55,7 +52,6 @@ PrimeMiner::PrimeMiner(unsigned id, unsigned threads, unsigned hashprim, unsigne
 	mFermatCheck = 0;
 	
 	MakeExit = false;
-	
 }
 
 PrimeMiner::~PrimeMiner() {
@@ -75,7 +71,6 @@ PrimeMiner::~PrimeMiner() {
 
 
 bool PrimeMiner::Initialize(cl_device_id dev) {
-	
 	cl_int error;
 	mHashMod = clCreateKernel(gProgram, "bhashmod", &error);
 	mSieveSetup = clCreateKernel(gProgram, "setup_sieve", &error);
@@ -199,18 +194,19 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 	OCL(error);
 	
 	hashprimorial = 1;
+	printf("mHashPrimorial is %u, mPrimorial is %u.\n", mHashPrimorial, mPrimorial);
 	for(unsigned i = 0; i <= mHashPrimorial; ++i)
 		hashprimorial *= gPrimes[i];
 	
 	primorial = 1;
 	for(unsigned i = mHashPrimorial+1; i <= mPrimorial; ++i)
 		primorial *= gPrimes[i];
-	
+
 	{
 		unsigned primorialbits = mpz_sizeinbase(primorial.get_mpz_t(), 2);
 		mpz_class sievesize = mConfig.SIZE*32*mConfig.STRIPES;
 		unsigned sievebits = mpz_sizeinbase(sievesize.get_mpz_t(), 2);
-		printf("GPU %d: hash primorial = %u (%d bits)\n", mID, hashprimorial, (int)log2(hashprimorial));
+		printf("GPU %d: hash primorial = %u(%u) (%d bits)\n", mID, hashprimorial, sizeof(hashprimorial),(int)log2(hashprimorial));
 		printf("GPU %d: sieve primorial = %s (%d bits)\n", mID, primorial.get_str(10).c_str(), primorialbits);
 		printf("GPU %d: sieve size = %s (%d bits)\n", mID, sievesize.get_str(10).c_str(), sievebits);
 		printf("GPU %d: max bits used %d/%d\n", mID, 256+primorialbits+sievebits+mConfig.WIDTH, mConfig.N*32);
@@ -267,12 +263,12 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 	
 	bool run = true;
 	while(run){
-		
+
 		if(zsocket_poll(pipe, 0)){
 			zsocket_wait(pipe);
 			zsocket_wait(pipe);
 		}
-		
+
 		//printf("\n--------- iteration %d -------\n", iteration);
 		{
 			time_t currtime = time(0);
@@ -281,7 +277,7 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				zsocket_sendmem(statspush, &stats, sizeof(stats), 0);
 				time1 = currtime;
 			}
-			
+
 			elapsed = currtime - time2;
 			if(elapsed > 59){
 				stats.fps = testCount / elapsed;
@@ -295,30 +291,32 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 		stats.cpd = 24.*3600. * double(stats.fps) * pow(stats.primeprob, mConfig.TARGET);
 		
 		// get work
-		bool reset = false;
-		{
-			bool getwork = true;
-			while(getwork && run){
-				
-				if(zsocket_poll(worksub, 0) || work.height() < block.height()){
-					run = ReceivePub(work, worksub);
-					reset = true;
-				}
-				
-				getwork = false;
-				if(zsocket_poll(blocksub, 0) || work.height() > block.height()){
-					run = ReceivePub(block, blocksub);
-					getwork = true;
-				}
-			}
-		}
+        bool reset = false;
+        {
+            bool getwork = true;
+            while(getwork && run){
+                if(zsocket_poll(worksub, 0) || work.height() < block.height()){
+                    run = ReceivePub(work, worksub);
+                    reset = true;
+                }
+
+                getwork = false;
+                if(zsocket_poll(blocksub, 0) || work.height() > block.height()){
+                    run = ReceivePub(block, blocksub);
+                    getwork = true;
+                }
+            }
+        }
 		if(!run)
 			break;
-		
+		else{
+			printf("(Time:%d)New work %d: merkle(%s) bits(%x).\n", work.time(), work.height(), work.merkle().c_str(), work.bits());
+			printf("New block %d: hash(%s), prevhash(%s), reqdiff(%u) minshare(%u).\n", block.height(), block.hash().c_str(), block.prevhash().c_str(), block.reqdiff(), block.minshare());
+		}
+
 		// reset if new work
 		if(reset){
-			
-			//printf("new work received\n");
+			printf("new work received\n");
 			hashlist.clear();
 			hashmod.count[0] = 0;
 			fermat.bsize = 0;
@@ -341,22 +339,23 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 			if(target > mConfig.TARGET){
 				printf("ERROR: This miner is compiled with the wrong target: %d (required target %d)\n", mConfig.TARGET, target);
 				return;
+			}else {
+				printf("Legal target %d < %d\n", target, mConfig.TARGET);
 			}
-			
+
+			/*Analyze: sha transform.*/
 			SHA_256 sha;
 			sha.init();
 			sha.transform((const unsigned char*)&blockheader, 1u);
 			for(int i = 0; i < 8; ++i)
 				hashmod.midstate[i] = sha.m_h[i];
 			hashmod.midstate.copyToDevice(mBig, false);
-			
 		}
 		
 		// hashmod fetch & dispatch
 		{
-			//printf("got %d new hashes\n", hashmod.count[0]);
+			printf("got %d new hashes\n", hashmod.count[0]);
 			for(unsigned i = 0; i < hashmod.count[0]; ++i) {
-				
 				hash_t hash;
 				hash.iter = iteration;
 				hash.time = blockheader.time;
@@ -364,7 +363,7 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				
 				block_t b = blockheader;
 				b.nonce = hash.nonce;
-				
+
 				SHA_256 sha;
 				sha.init();
 				sha.update((const unsigned char*)&b, sizeof(b));
@@ -372,7 +371,7 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				sha.init();
 				sha.update((const unsigned char*)&hash.hash, sizeof(uint256));
 				sha.final((unsigned char*)&hash.hash);
-				
+
 				if(hash.hash < (uint256(1) << 255)){
 					printf("error: hash does not meet minimum.\n");
 					stats.errors++;
@@ -380,31 +379,31 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				}
 				
 				mpz_class mpzHash;
-				mpz_set_uint256(mpzHash.get_mpz_t(), hash.hash);
-				if(!mpz_divisible_ui_p(mpzHash.get_mpz_t(), hashprimorial)){
-					printf("error: mpz_divisible_ui_p failed.\n");
-					stats.errors++;
-					continue;
-				}
+                mpz_set_uint256(mpzHash.get_mpz_t(), hash.hash);
+                if(!mpz_divisible_ui_p(mpzHash.get_mpz_t(), hashprimorial)){
+                    printf("error: mpz_divisible_ui_p failed.\n");
+                    stats.errors++;
+                    continue;
+                }else{
+                    gmp_printf("divisible: 0x%Z, %d\n", mpzHash.get_mpz_t(), hashprimorial);
+                }
 				
 				hash.shash = mpzHash * primorial;
 				hashlist.push_back(hash);
-				
 			}
 			
-			//printf("hashlist.size() = %d\n", (int)hashlist.size());
+			printf("hashlist.size() = %d\n", (int)hashlist.size());
 			hashmod.count[0] = 0;
 			
 			int numhash = ((4*SW) - hashlist.size()) * hashprimorial * 2;
-			if(numhash > 0){
-				
-				numhash += mBlockSize - numhash % mBlockSize;
-				if(blockheader.nonce > (1u << 31)){
-					blockheader.time += mThreads;
-					blockheader.nonce = 1;
-				}
-				
-				//printf("hashmod: numhash=%d time=%d nonce=%d\n", numhash, blockheader.time, blockheader.nonce);
+			if(numhash > 0) {
+                numhash += mBlockSize - numhash % mBlockSize;
+                if (blockheader.nonce > (1u << 31)) {
+                    blockheader.time += mThreads;
+                    blockheader.nonce = 1;
+                }
+
+                printf("hashmod: numhash=%d time=%d nonce=%d\n", numhash, blockheader.time, blockheader.nonce);
 				cl_uint msg_merkle = blockheader.hashMerkleRoot.Get64(3) >> 32;
 				cl_uint msg_time = blockheader.time;
 				cl_uint msg_bits = blockheader.bits;
@@ -414,16 +413,14 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				OCL(clSetKernelArg(mHashMod, 4, sizeof(cl_uint), &msg_merkle));
 				OCL(clSetKernelArg(mHashMod, 5, sizeof(cl_uint), &msg_time));
 				OCL(clSetKernelArg(mHashMod, 6, sizeof(cl_uint), &msg_bits));
-				size_t globalOffset[] = { blockheader.nonce, 1, 1 };
-				size_t globalSize[] = { numhash, 1, 1 };
+				size_t globalOffset[] = {blockheader.nonce, 1, 1};
+				size_t globalSize[] = {numhash, 1, 1};
 				hashmod.count.copyToDevice(mBig, false);
 				OCL(clEnqueueNDRangeKernel(mBig, mHashMod, 1, globalOffset, globalSize, 0, 0, 0, 0));
 				hashmod.found.copyToHost(mBig, false);
 				hashmod.count.copyToHost(mBig, false);
 				blockheader.nonce += numhash;
-				
-			}
-			
+            }
 		}
 		
 		int ridx = iteration % 2;
@@ -433,14 +430,12 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 		{
 			std::vector<int> newhashes;
 			for(int i = 0; i < SW; ++i){
-				
 				if(!hashlist.size()){
 					if(!reset) printf("warning: ran out of hashes. pipeline stalled.\n");
 					break;
 				}
 				
 				if(!sieveBuffers[i][widx].count[0]){
-					
 					int hid = nexthash % PW;
 					nexthash++;
 					hashes[hid] = hashlist.back();
@@ -448,33 +443,32 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 					hashlist.pop_back();
 					newhashes.push_back(hid << 16 | i);
 					mpz_export(&hashBuf[hid*mConfig.N], 0, -1, 4, 0, 0, hashes[hid].shash.get_mpz_t());
-					
 				}
-				
 			}
+
+            printf("dispatching %d sieves\n", (int)newhashes.size());
+            hashBuf.copyToDevice(mSmall, false);
 			
-			//printf("dispatching %d sieves\n", (int)newhashes.size());
-			hashBuf.copyToDevice(mSmall, false);
-			
-			for(unsigned i = 0; i < newhashes.size(); ++i){
-				
+			for(unsigned i = 0; i < newhashes.size(); ++i)
+			{
 				int si = newhashes[i] & 0xFFFF;
 				cl_int hid = newhashes[i] >> 16;
-				
-				//printf("sieve %d: hashid = %d\n", si, hid);
+
+				/*setup_Sieve*/
+				printf("sieve %d: hashid = %d\n", si, hid);
 				{
 					OCL(clSetKernelArg(mSieveSetup, 4, sizeof(cl_int), &hid));
 					size_t globalSize[] = { mConfig.PCOUNT, 1, 1 };
 					OCL(clEnqueueNDRangeKernel(mSmall, mSieveSetup, 1, 0, globalSize, 0, 0, 0, 0));
 				}
-				
-				for(int k = 0; k < 2; ++k){
-					
+
+				/*Sieve*/
+				for(int k = 0; k < 2; ++k)
+				{
 					OCL(clSetKernelArg(mSieve, 0, sizeof(cl_mem), &sieveBuf[k].DeviceData));
 					OCL(clSetKernelArg(mSieve, 1, sizeof(cl_mem), &sieveOff[k].DeviceData));
 					size_t globalSize[] = { 256*mConfig.STRIPES/2, mConfig.WIDTH, 1 };
 					OCL(clEnqueueNDRangeKernel(mSmall, mSieve, 2, 0, globalSize, 0, 0, 0, 0));
-					
 				}
 				
 				sieveBuffers[si][widx].count.copyToDevice(mSmall, false);
@@ -486,11 +480,8 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 					OCL(clEnqueueNDRangeKernel(mSmall, mSieveSearch, 1, 0, globalSize, 0, 0, 0, 0));
 					sieveBuffers[si][widx].count.copyToHost(mSmall, false);
 				}
-				
 			}
-			
 		}
-		
 		// get candis
 		int numcandis = fermat.final.count[0];
 		numcandis = std::min(numcandis, fermat.final.info.Size);
@@ -564,13 +555,12 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 		clFlush(mBig);
 		clFlush(mSmall);
 		
-		// check candis
+		// check candis(candidates)
 		if(candis.size()){
-			//printf("checking %d candis\n", (int)candis.size());
+			printf("checking %d candis\n", (int)candis.size());
 			mpz_class chainorg;
 			mpz_class multi;
 			for(unsigned i = 0; i < candis.size(); ++i){
-				
 				fermat_t& candi = candis[i];
 				hash_t& hash = hashes[candi.hashid % PW];
 				
@@ -591,10 +581,9 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 				bool isblock = ProbablePrimeChainTestFast(chainorg, testParams);
 				
 				unsigned chainlength = TargetGetLength(testParams.nChainLength);
-				/*printf("candi %d: hashid=%d index=%d origin=%d type=%d length=%d\n",
-						i, candi.hashid, candi.index, candi.origin, candi.type, chainlength);*/
+				printf("candi %d: hashid=%d index=%d origin=%d type=%d length=%d\n",
+						i, candi.hashid, candi.index, candi.origin, candi.type, chainlength);
 				if(chainlength >= block.minshare()){
-					
 					mpz_class sharemulti = primorial * multi;
 					share.set_hash(hash.hash.GetHex());
 					share.set_merkle(work.merkle());
@@ -607,12 +596,13 @@ void PrimeMiner::Mining(zctx_t *ctx, void *pipe) {
 					share.set_chaintype(candi.type);
 					share.set_isblock(isblock);
 					
-					printf("GPU %d found share: %d-ch type %d\n", mID, chainlength, candi.type+1);
+					printf("GPU %d found share: %d-ch type %d origin %s\n", mID, chainlength, candi.type+1, chainorg.get_str(128));
+					printf("Share： hash %s, merkle %s.\n", hash.hash.GetHex(), work.merkle());
+					printf("Share： multi %s, nonce %u.\n", sharemulti.get_str(128), hash.nonce);
 					if(isblock)
 						printf("GPU %d found BLOCK!\n", mID);
 					
 					Send(share, sharepush);
-					
 				}else if(chainlength < mDepth){
 					printf("error: ProbablePrimeChainTestFast %d/%d\n", chainlength, mDepth);
 					stats.errors++;
